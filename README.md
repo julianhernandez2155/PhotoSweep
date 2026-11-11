@@ -167,3 +167,5 @@ Two things in the code look odd on purpose. Both are there so the project builds
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+PhotoSweep is an independent project. It is not affiliated with other apps that use the same or a similar name.
