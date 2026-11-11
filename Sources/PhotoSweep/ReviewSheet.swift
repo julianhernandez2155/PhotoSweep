@@ -98,6 +98,13 @@ private struct ReviewThumbnail: View {
         nonmutating set { _hovering.wrappedValue = newValue }
     }
 
+    // Written out because, before Swift 6.4, the private state above makes the automatic initializer private.
+    init(asset: PHAsset, bytes: Int64, onKeep: @escaping () -> Void) {
+        self.asset = asset
+        self.bytes = bytes
+        self.onKeep = onKeep
+    }
+
     var body: some View {
         Button(action: onKeep) {
             ZStack {

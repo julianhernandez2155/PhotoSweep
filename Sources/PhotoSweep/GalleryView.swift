@@ -13,41 +13,64 @@ struct GalleryView: View {
 
     var body: some View {
         GeometryReader { geometry in
-            // The column count is worked out here, not left to the grid, so the arrow keys
-            // know how far "up" and "down" are.
-            let columnCount = max(1, Int((geometry.size.width - padding * 2 + spacing) / (targetCellWidth + spacing)))
-            let marked = Set(model.store.marked)
-            ZStack {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVGrid(
-                            columns: Array(repeating: GridItem(.flexible(), spacing: spacing), count: columnCount),
-                            spacing: spacing
-                        ) {
-                            ForEach(model.deck.ids, id: \.self) { id in
-                                if let asset = model.asset(forID: id) {
-                                    GalleryCell(
-                                        asset: asset,
-                                        decision: marked.contains(id) ? .delete : (model.store.isKept(id) ? .keep : nil),
-                                        isFocused: model.galleryFocus == id,
-                                        onClick: { model.galleryClick(id) },
-                                        onEnlarge: { model.openPreview(id) })
-                                }
-                            }
-                        }
-                        .padding(padding)
-                    }
-                    .onChange(of: model.galleryFocus) { _, focus in
-                        if let focus { proxy.scrollTo(focus) }
-                    }
-                }
+            content(columnCount: columnCount(forWidth: geometry.size.width))
+        }
+    }
 
-                if let id = model.previewID, let asset = model.asset(forID: id) {
-                    GalleryPreview(asset: asset, isMarked: marked.contains(id))
+    /// The column count is worked out here, not left to the grid, so the arrow keys know how
+    /// far "up" and "down" are.
+    private func columnCount(forWidth width: CGFloat) -> Int {
+        let usable: CGFloat = width - padding * 2 + spacing
+        let perCell: CGFloat = targetCellWidth + spacing
+        return max(1, Int(usable / perCell))
+    }
+
+    private func content(columnCount: Int) -> some View {
+        let marked = Set(model.store.marked)
+        return ZStack {
+            grid(columnCount: columnCount, marked: marked)
+            preview(marked: marked)
+        }
+        .onAppear { model.galleryColumns = columnCount }
+        .onChange(of: columnCount) { _, count in model.galleryColumns = count }
+    }
+
+    private func grid(columnCount: Int, marked: Set<String>) -> some View {
+        let columns = Array(repeating: GridItem(.flexible(), spacing: spacing), count: columnCount)
+        return ScrollViewReader { proxy in
+            ScrollView {
+                LazyVGrid(columns: columns, spacing: spacing) {
+                    ForEach(model.deck.ids, id: \.self) { id in
+                        cell(id, marked: marked)
+                    }
                 }
+                .padding(padding)
             }
-            .onAppear { model.galleryColumns = columnCount }
-            .onChange(of: columnCount) { _, count in model.galleryColumns = count }
+            .onChange(of: model.galleryFocus) { _, focus in
+                if let focus { proxy.scrollTo(focus) }
+            }
+        }
+    }
+
+    @ViewBuilder private func cell(_ id: String, marked: Set<String>) -> some View {
+        if let asset = model.asset(forID: id) {
+            GalleryCell(
+                asset: asset,
+                decision: decision(for: id, marked: marked),
+                isFocused: model.galleryFocus == id,
+                onClick: { model.galleryClick(id) },
+                onEnlarge: { model.openPreview(id) })
+        }
+    }
+
+    private func decision(for id: String, marked: Set<String>) -> Decision? {
+        if marked.contains(id) { return .delete }
+        return model.store.isKept(id) ? .keep : nil
+    }
+
+    @ViewBuilder private func preview(marked: Set<String>) -> some View {
+        if let id = model.previewID, let asset = model.asset(forID: id) {
+            GalleryPreview(asset: asset, isMarked: marked.contains(id))
         }
     }
 }
@@ -67,50 +90,70 @@ private struct GalleryCell: View {
         nonmutating set { _hovering.wrappedValue = newValue }
     }
 
+    // Written out because, before Swift 6.4, the private state above makes the automatic initializer private.
+    init(
+        asset: PHAsset, decision: Decision?, isFocused: Bool,
+        onClick: @escaping () -> Void, onEnlarge: @escaping () -> Void
+    ) {
+        self.asset = asset
+        self.decision = decision
+        self.isFocused = isFocused
+        self.onClick = onClick
+        self.onEnlarge = onEnlarge
+    }
+
     private var isMarked: Bool { decision == .delete }
     private let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
 
     var body: some View {
-        Color(white: 0.12)
-            .aspectRatio(1, contentMode: .fit)
-            .overlay {
-                if let thumbnail = image.image {
-                    Image(nsImage: thumbnail)
-                        .resizable()
-                        .scaledToFill()
-                }
-            }
-            .overlay { if isMarked { Color.red.opacity(0.38) } }
-            .clipShape(shape)
+        thumbnail
             .overlay(alignment: .topLeading) { stateBadge.padding(6) }
             .overlay(alignment: .bottomLeading) { videoBadge.padding(6) }
-            .overlay(alignment: .topTrailing) {
-                if hovering {
-                    Button(action: onEnlarge) {
-                        Image(systemName: "arrow.up.left.and.arrow.down.right")
-                            .font(.caption.weight(.bold))
-                            .foregroundStyle(.white)
-                            .padding(6)
-                            .background(.black.opacity(0.65), in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .padding(6)
-                    .help("See it larger (Space)")
-                }
-            }
-            .overlay {
-                if isFocused {
-                    shape.strokeBorder(Color.white, lineWidth: 3)
-                } else if isMarked {
-                    shape.strokeBorder(Color.red, lineWidth: 3)
-                }
-            }
+            .overlay(alignment: .topTrailing) { enlargeButton }
+            .overlay { border }
             .contentShape(Rectangle())
             .onTapGesture(perform: onClick)
             .onHover { hovering = $0 }
             .help(isMarked ? "Click to take it off the delete list" : "Click to mark for deletion")
             .onAppear { image.load(asset, targetSize: ImagePipeline.thumbnailSize) }
             .onDisappear { image.cancel() }
+    }
+
+    private var thumbnail: some View {
+        Color(white: 0.12)
+            .aspectRatio(1, contentMode: .fit)
+            .overlay {
+                if let loaded = image.image {
+                    Image(nsImage: loaded)
+                        .resizable()
+                        .scaledToFill()
+                }
+            }
+            .overlay { if isMarked { Color.red.opacity(0.38) } }
+            .clipShape(shape)
+    }
+
+    @ViewBuilder private var enlargeButton: some View {
+        if hovering {
+            Button(action: onEnlarge) {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.white)
+                    .padding(6)
+                    .background(.black.opacity(0.65), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .padding(6)
+            .help("See it larger (Space)")
+        }
+    }
+
+    @ViewBuilder private var border: some View {
+        if isFocused {
+            shape.strokeBorder(Color.white, lineWidth: 3)
+        } else if isMarked {
+            shape.strokeBorder(Color.red, lineWidth: 3)
+        }
     }
 
     @ViewBuilder private var stateBadge: some View {
