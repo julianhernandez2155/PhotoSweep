@@ -23,11 +23,15 @@ PhotoSweep makes no network connections of its own. It has no accounts, analytic
 
 The sidebar has three groups:
 
-- **Cleanup**: any album whose name starts with "Cleanup" is pinned here at the top. Make an album like "Cleanup - Trip videos" in Photos to give yourself a short queue.
-- **Library**: Duplicates, Screenshots, Screen Recordings, Videos, Live Photos, and All Photos & Videos.
-- **Albums**: your other albums.
+- **Cleanup**: the places where the most space usually hides.
+  - **Duplicates**: exact extra copies (see below).
+  - **Large Videos**: videos of 100 MB or more.
+  - **Screenshots** and **Screen Recordings**.
+  - **From Snapchat**, **From WhatsApp** and so on: one queue for each app that has saved 20 or more items into your library, up to six apps. Things saved from chat and social apps are often the easiest to let go.
+- **Library**: Videos, Live Photos, and All Photos & Videos.
+- **Albums**: your own albums.
 
-Hidden items and shared albums are never shown. Empty albums are left out.
+Hidden items and shared albums are never shown. Queues with nothing in them are left out. Duplicates, Large Videos and the per-app queues come from a scan that runs in the background after launch, so they appear a few seconds after the rest.
 
 A switch at the top of the sidebar chooses what you go through:
 
@@ -53,7 +57,7 @@ Marking in the grid does the same thing as swiping left: it adds the item to the
 
 The Duplicates queue finds items stored more than once: same type, same pixel size, same capture time to the second, same video length, and the same file size. It only finds exact copies. It does not look for photos that are merely similar.
 
-For each set of copies it keeps one and puts the others in the queue. It prefers to keep a favorite, and it never picks a copy you have already marked for deletion if another copy exists. The queue only appears when there is something in it, and the scan runs in the background after launch.
+For each set of copies it keeps one and puts the others in the queue. It prefers to keep a favorite, and it never picks a copy you have already marked for deletion if another copy exists.
 
 ## Controls
 
@@ -138,7 +142,8 @@ To start over:
 
 ## Known limits
 
-- **File sizes come from a value Apple does not document.** PhotoKit has no public way to ask how big an item is, so the app reads a `fileSize` value from each item's resources. It works on the tested system, but Apple could change it. If it is unavailable the app shows "size unknown", the Largest sort has nothing to sort by, and the Duplicates queue stays empty, because a duplicate is only confirmed when file sizes match.
+- **File sizes come from a value Apple does not document.** PhotoKit has no public way to ask how big an item is, so the app reads a `fileSize` value from each item's resources. It works on the tested system, but Apple could change it. If it is unavailable the app shows "size unknown", the Largest sort has nothing to sort by, and the Duplicates and Large Videos queues stay empty, because both depend on file sizes.
+- **Which app saved an item is also undocumented.** The per-app queues read it from a value PhotoKit does not publish. If it is unavailable, those queues simply do not appear.
 - **It has only been tested on one setup** (macOS 27.2, Swift 6.4, Apple Silicon, a large library stored in iCloud Photos).
 - **The window is English only.**
 
@@ -146,7 +151,7 @@ To start over:
 
 ```sh
 swift build
-swift test
+./scripts/test.sh
 ```
 
 - `Sources/SweepCore` holds the logic that does not touch Photos: the queue and undo history, saved decisions, the sidebar counts, and duplicate grouping. All of the tests cover this part.
@@ -162,7 +167,7 @@ open build/PhotoSweep.app --args --selftest /tmp/photosweep-selftest.json
 Two things in the code look odd on purpose. Both are there so the project builds with only the Command Line Tools installed:
 
 - View state is declared as `State<T>(initialValue:)` with a small computed accessor instead of `@State`. In the tested SDK, `@State` is a macro whose compiler plugin ships only with full Xcode.
-- All tests are in a single file. With more than one test file, the build could not find the Swift Testing macro plugin.
+- `scripts/test.sh` clears the test target's build files before running `swift test`. With only the Command Line Tools, rebuilding the tests on top of an earlier build can fail with "plugin for module 'TestingMacros' not found". With full Xcode, plain `swift test` works.
 
 ## License
 

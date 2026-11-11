@@ -8,8 +8,18 @@ enum QueueKind: Hashable {
     case videos
     case livePhotos
     case duplicates
+    case largeVideos
+    case savedBy(String)  // bundle identifier of the app that saved the items
     case all
     case album(String)  // album localIdentifier
+
+    /// Queues whose contents come from the background scan, not from a plain library fetch.
+    var isScanned: Bool {
+        switch self {
+        case .duplicates, .largeVideos, .savedBy: return true
+        default: return false
+        }
+    }
 
     /// Whether the queue can hold video, which decides if "Longest" is a useful sort.
     var canContainVideo: Bool {
@@ -35,13 +45,6 @@ struct SweepQueue: Identifiable, Hashable {
     var count: Int
 
     var id: QueueKind { kind }
-
-    /// The built-in queue of extra copies. It only exists once a scan has found some.
-    static func duplicates(count: Int) -> SweepQueue {
-        SweepQueue(
-            kind: .duplicates, title: "Duplicates", symbol: "square.on.square",
-            section: .library, count: count)
-    }
 }
 
 /// The sidebar's queues plus the item IDs in each one, which is what the counts are built from.
@@ -92,7 +95,7 @@ enum PhotoLibrary {
                 image, Int(PHAssetMediaSubtype.photoLive.rawValue))
         case .all:
             return NSPredicate(format: "mediaType == %d OR mediaType == %d", image, video)
-        case .album, .duplicates:
+        case .album, .duplicates, .largeVideos, .savedBy:
             return nil
         }
     }
@@ -111,14 +114,16 @@ enum PhotoLibrary {
         }
     }
 
-    /// `duplicateIDs` is only used for the Duplicates queue, whose contents come from a scan.
+    /// `scannedIDs` supplies the contents of queues that come from the background scan.
+    /// `withSources` also loads which app saved each item, which only the scan needs.
     static func fetch(
-        _ kind: QueueKind, sort: SortOrder = .newest, duplicateIDs: [String] = []
+        _ kind: QueueKind, sort: SortOrder = .newest, scannedIDs: [String] = [], withSources: Bool = false
     ) -> PHFetchResult<PHAsset> {
         let options = baseOptions()
         options.sortDescriptors = sortDescriptors(for: sort)
-        if kind == .duplicates {
-            return PHAsset.fetchAssets(withLocalIdentifiers: duplicateIDs, options: options)
+        if withSources { ImportSource.prefetch(on: options) }
+        if kind.isScanned {
+            return PHAsset.fetchAssets(withLocalIdentifiers: scannedIDs, options: options)
         }
         if case .album(let identifier) = kind {
             guard
@@ -152,50 +157,42 @@ enum PhotoLibrary {
         return ids
     }
 
-    /// Every queue for the sidebar, in display order, with the IDs of the items in each.
-    /// Albums with nothing in them are left out. The Duplicates queue is added separately,
-    /// once its scan finishes. Reads the whole library, so call it off the main thread.
+    /// The queues that come straight from the library, in display order, with the IDs of the
+    /// items in each. Empty ones are left out. Queues found by the background scan (Duplicates,
+    /// Large Videos, per-app) are added separately. Reads the whole library, so call it off
+    /// the main thread.
     static func index() -> LibraryIndex {
         var members: [QueueKind: [String]] = [:]
-        var cleanup: [SweepQueue] = []
         var albums: [SweepQueue] = []
         let collections = PHAssetCollection.fetchAssetCollections(
             with: .album, subtype: .albumRegular, options: nil)
         collections.enumerateObjects { album, _, _ in
             let ids = identifiers(in: PHAsset.fetchAssets(in: album, options: baseOptions()))
-            let count = ids.count
-            guard count > 0 else { return }
-            members[.album(album.localIdentifier)] = ids
-            let title = album.localizedTitle ?? "Untitled"
-            let isCleanup = title.lowercased().hasPrefix("cleanup")
-            let queue = SweepQueue(
-                kind: .album(album.localIdentifier),
-                title: title,
-                symbol: isCleanup ? "sparkles.rectangle.stack" : "rectangle.stack",
-                section: isCleanup ? .cleanup : .albums,
-                count: count)
-            if isCleanup { cleanup.append(queue) } else { albums.append(queue) }
-        }
-        let byTitle: (SweepQueue, SweepQueue) -> Bool = {
-            $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
-        }
-        cleanup.sort(by: byTitle)
-        albums.sort(by: byTitle)
-
-        let builtIn: [(QueueKind, String, String)] = [
-            (.screenshots, "Screenshots", "camera.viewfinder"),
-            (.screenRecordings, "Screen Recordings", "record.circle"),
-            (.videos, "Videos", "video"),
-            (.livePhotos, "Live Photos", "livephoto"),
-            (.all, "All Photos & Videos", "photo.on.rectangle.angled"),
-        ]
-        let library = builtIn.map { kind, title, symbol in
-            let ids = identifiers(in: fetch(kind))
+            guard !ids.isEmpty else { return }
+            let kind = QueueKind.album(album.localIdentifier)
             members[kind] = ids
-            return SweepQueue(
-                kind: kind, title: title, symbol: symbol, section: .library, count: ids.count)
+            albums.append(
+                SweepQueue(
+                    kind: kind, title: album.localizedTitle ?? "Untitled", symbol: "rectangle.stack",
+                    section: .albums, count: ids.count))
         }
-        return LibraryIndex(queues: cleanup + library + albums, members: members)
+        albums.sort { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+
+        let builtIn: [(QueueKind, String, String, QueueSection)] = [
+            (.screenshots, "Screenshots", "camera.viewfinder", .cleanup),
+            (.screenRecordings, "Screen Recordings", "record.circle", .cleanup),
+            (.videos, "Videos", "video", .library),
+            (.livePhotos, "Live Photos", "livephoto", .library),
+            (.all, "All Photos & Videos", "photo.on.rectangle.angled", .library),
+        ]
+        var library: [SweepQueue] = []
+        for (kind, title, symbol, section) in builtIn {
+            let ids = identifiers(in: fetch(kind))
+            guard !ids.isEmpty || kind == .all else { continue }
+            members[kind] = ids
+            library.append(SweepQueue(kind: kind, title: title, symbol: symbol, section: section, count: ids.count))
+        }
+        return LibraryIndex(queues: library + albums, members: members)
     }
 
     /// Looks items up by ID, in the order given. IDs that no longer exist are skipped.
@@ -210,16 +207,52 @@ enum PhotoLibrary {
     }
 }
 
-/// Looks through the whole library for items that are stored more than once.
-enum DuplicateScanner {
+/// Which app saved an item into the library. PhotoKit has no public way to ask, so this reads
+/// a value Apple does not document. Every step is checked first, and when it is missing the
+/// app simply offers no per-app queues.
+enum ImportSource {
+    private static let propertySet = "PHAssetPropertySetCuration"
+    private static let propertiesSelector = NSSelectorFromString("curationProperties")
+    private static let bundleSelector = NSSelectorFromString("importedByBundleIdentifier")
+    private static let nameSelector = NSSelectorFromString("importedByDisplayName")
+    private static let prefetchSelector = NSSelectorFromString("setFetchPropertySets:")
+
+    static let isAvailable = PHAsset.instancesRespond(to: propertiesSelector)
+
+    /// Asks for the value to be loaded along with each item, instead of one lookup per item later.
+    static func prefetch(on options: PHFetchOptions) {
+        guard isAvailable, options.responds(to: prefetchSelector) else { return }
+        options.setValue([propertySet], forKey: "fetchPropertySets")
+    }
+
+    static func read(_ asset: PHAsset) -> (bundleID: String, appName: String)? {
+        guard isAvailable,
+            let properties = asset.value(forKey: "curationProperties") as? NSObject,
+            properties.responds(to: bundleSelector),
+            let bundleID = properties.value(forKey: "importedByBundleIdentifier") as? String,
+            !bundleID.isEmpty
+        else { return nil }
+        var appName = ""
+        if properties.responds(to: nameSelector) {
+            appName = properties.value(forKey: "importedByDisplayName") as? String ?? ""
+        }
+        return (bundleID, appName)
+    }
+}
+
+/// Looks through the whole library for the things most worth clearing out: items stored more
+/// than once, very large videos, and whatever other apps saved in bulk.
+enum CleanupScanner {
     struct Result {
-        var groups: [DuplicateGroup]
-        /// The extra copies, newest first. The copy being kept from each group is not in here.
-        var extras: [String]
+        /// The queues the scan found something for, in sidebar order.
+        var queues: [SweepQueue]
+        var members: [QueueKind: [String]]
+        var duplicateGroups: [DuplicateGroup]
         /// File sizes measured during this scan that were not already known.
         var measured: [String: Int64]
         var scannedCount: Int
-        var candidateCount: Int
+        var lookAlikeCount: Int
+        var sourcesAvailable: Bool
     }
 
     /// Returns nil if `isCancelled` turned true part-way. `progress` gets 0...1.
@@ -231,10 +264,12 @@ enum DuplicateScanner {
         isCancelled: @escaping () -> Bool = { false },
         progress: @escaping (Double) -> Void = { _ in }
     ) -> Result? {
-        let all = PhotoLibrary.fetch(.all)
+        let all = PhotoLibrary.fetch(.all, withSources: true)
         let total = max(all.count, 1)
         var assets: [String: PHAsset] = [:]
         var items: [DuplicateCandidate] = []
+        var videoIDs: [String] = []
+        var sources: [ItemSource] = []
         assets.reserveCapacity(all.count)
         items.reserveCapacity(all.count)
         var cancelled = false
@@ -249,10 +284,15 @@ enum DuplicateScanner {
                 }
                 progress(0.3 * Double(index) / Double(total))
             }
-            assets[asset.localIdentifier] = asset
+            let id = asset.localIdentifier
+            assets[id] = asset
+            if asset.mediaType == .video { videoIDs.append(id) }
+            if let source = ImportSource.read(asset) {
+                sources.append(ItemSource(id: id, bundleID: source.bundleID, appName: source.appName))
+            }
             items.append(
                 DuplicateCandidate(
-                    id: asset.localIdentifier,
+                    id: id,
                     mediaType: asset.mediaType.rawValue,
                     pixelWidth: asset.pixelWidth,
                     pixelHeight: asset.pixelHeight,
@@ -262,9 +302,12 @@ enum DuplicateScanner {
         }
         if cancelled { return nil }
 
-        // Pass 2 measures file sizes, but only for items that already look alike.
+        // Pass 2 measures file sizes, but only where they matter: items that already look alike,
+        // and videos.
         let candidates = DuplicateFinder.candidates(items)
-        let toMeasure = candidates.joined().map(\.id).filter { knownSizes[$0] == nil }
+        var needed = Set(candidates.joined().map(\.id))
+        needed.formUnion(videoIDs)
+        let toMeasure = needed.filter { knownSizes[$0] == nil }
         var measured: [String: Int64] = [:]
         for (index, id) in toMeasure.enumerated() {
             if index % 50 == 0 {
@@ -276,16 +319,32 @@ enum DuplicateScanner {
             if bytes > 0 { measured[id] = bytes }
         }
         if isCancelled() { return nil }
+        let sizes = knownSizes.merging(measured) { $1 }
 
-        let groups = DuplicateFinder.groups(
-            candidates, sizes: knownSizes.merging(measured) { $1 }, kept: kept, marked: marked)
+        var queues: [SweepQueue] = []
+        var members: [QueueKind: [String]] = [:]
+        func add(_ kind: QueueKind, _ title: String, _ symbol: String, _ ids: [String]) {
+            guard !ids.isEmpty else { return }
+            members[kind] = ids
+            queues.append(SweepQueue(kind: kind, title: title, symbol: symbol, section: .cleanup, count: ids.count))
+        }
+
+        let groups = DuplicateFinder.groups(candidates, sizes: sizes, kept: kept, marked: marked)
+        add(.duplicates, "Duplicates", "square.on.square", DuplicateFinder.extras(groups))
+        add(.largeVideos, "Large Videos", "film", LargeItems.select(videoIDs, sizes: sizes))
+        for group in SourceGrouping.groups(sources) {
+            add(.savedBy(group.bundleID), "From \(group.appName)", "square.and.arrow.down", group.ids)
+        }
+
         progress(1)
         return Result(
-            groups: groups,
-            extras: DuplicateFinder.extras(groups),
+            queues: queues,
+            members: members,
+            duplicateGroups: groups,
             measured: measured,
             scannedCount: items.count,
-            candidateCount: candidates.reduce(0) { $0 + $1.count })
+            lookAlikeCount: candidates.reduce(0) { $0 + $1.count },
+            sourcesAvailable: ImportSource.isAvailable)
     }
 }
 

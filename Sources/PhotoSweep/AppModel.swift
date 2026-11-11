@@ -57,8 +57,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var markAllCount = 0
     /// Per-queue totals and "left to swipe" counts, kept current as decisions are made.
     @Published private(set) var tally = QueueTally<QueueKind>()
-    /// 0...1 during the first duplicate scan after launch; nil otherwise.
-    @Published private(set) var duplicateScanProgress: Double?
+    /// 0...1 during the first cleanup scan after launch; nil otherwise.
+    @Published private(set) var cleanupScanProgress: Double?
     @Published var confirmMarkAll = false
 
     @Published var viewMode: ViewMode {
@@ -98,10 +98,12 @@ final class AppModel: ObservableObject {
     /// What each item's decision was before it was swiped in the open queue (absent: none).
     /// Lets undo put back an earlier decision when browsing all items.
     private var earlierDecisions: [String: Decision] = [:]
-    /// Queues read from the library. `queues` is these plus the Duplicates queue when it has items.
+    /// Queues read from the library. `queues` is these plus whatever the cleanup scan found.
     private var libraryQueues: [SweepQueue] = []
-    private var duplicateIDs: [String] = []
-    private var hasScannedDuplicates = false
+    /// What the cleanup scan found: Duplicates, Large Videos and per-app queues, with their items.
+    private var scannedQueues: [SweepQueue] = []
+    private var scanned: [QueueKind: [String]] = [:]
+    private var hasScanned = false
     private var scanToken = LoadToken()
     private var refreshGeneration = 0
     private var sizes: [String: Int64]
@@ -197,12 +199,12 @@ final class AppModel: ObservableObject {
                 // A newer refresh is already on its way; let that one publish.
                 if generation == self.refreshGeneration {
                     var tally = tally
-                    tally.setMembers(self.duplicateIDs, for: .duplicates)
+                    for (kind, ids) in self.scanned { tally.setMembers(ids, for: kind) }
                     tally.syncDecided(self.decidedIDs)  // catch swipes made while this was running
                     self.tally = tally
                     self.libraryQueues = index.queues
                     self.publishQueues()
-                    self.scanForDuplicates()
+                    self.scanForCleanup()
                 }
                 completion?()
             }
@@ -211,14 +213,14 @@ final class AppModel: ObservableObject {
 
     private var decidedIDs: Set<String> { store.kept.union(store.marked) }
 
-    /// Rebuilds the sidebar list: the library's queues, plus Duplicates at the top of Library
-    /// when the last scan found any.
+    /// Rebuilds the sidebar list. Cleanup leads with what the scan found about wasted space,
+    /// then screenshots and screen recordings, then the per-app queues.
     private func publishQueues() {
-        var list = libraryQueues
-        if !duplicateIDs.isEmpty {
-            let position = list.firstIndex { $0.section == .library } ?? list.count
-            list.insert(.duplicates(count: duplicateIDs.count), at: position)
-        }
+        let lead = scannedQueues.filter { $0.kind == .duplicates || $0.kind == .largeVideos }
+        let apps = scannedQueues.filter { $0.kind != .duplicates && $0.kind != .largeVideos }
+        let cleanup = libraryQueues.filter { $0.section == .cleanup }
+        let rest = libraryQueues.filter { $0.section != .cleanup }
+        let list = lead + cleanup + apps + rest
         queues = list
         // Open the first queue at launch, or move off a queue that no longer exists.
         if !list.contains(where: { $0.kind == selected }) {
@@ -226,29 +228,29 @@ final class AppModel: ObservableObject {
         }
     }
 
-    // MARK: - Duplicates
+    // MARK: - Cleanup scan
 
-    /// Looks for duplicates in the background. File sizes it has to measure are cached, so only
-    /// the first scan is slow.
-    private func scanForDuplicates() {
+    /// Looks for duplicates, large videos and bulk saves from other apps, in the background.
+    /// File sizes it has to measure are cached, so only the first scan is slow.
+    private func scanForCleanup() {
         scanToken.cancel()
         let token = LoadToken()
         scanToken = token
-        if !hasScannedDuplicates { duplicateScanProgress = 0 }
+        if !hasScanned { cleanupScanProgress = 0 }
         let knownSizes = sizes
         let kept = store.kept
         let marked = Set(store.marked)
         DispatchQueue.global(qos: .utility).async { [weak self] in
             var lastReported = 0.0
-            let result = DuplicateScanner.scan(
+            let result = CleanupScanner.scan(
                 knownSizes: knownSizes, kept: kept, marked: marked,
                 isCancelled: { token.isCancelled },
                 progress: { fraction in
                     guard fraction - lastReported >= 0.02 else { return }
                     lastReported = fraction
                     DispatchQueue.main.async {
-                        guard let self, !token.isCancelled, self.duplicateScanProgress != nil else { return }
-                        self.duplicateScanProgress = fraction
+                        guard let self, !token.isCancelled, self.cleanupScanProgress != nil else { return }
+                        self.cleanupScanProgress = fraction
                     }
                 })
             guard let result else { return }
@@ -259,16 +261,25 @@ final class AppModel: ObservableObject {
                     self.sizesDirty = true
                     self.scheduleSave()
                 }
-                let changed = result.extras != self.duplicateIDs
-                self.duplicateIDs = result.extras
-                self.hasScannedDuplicates = true
-                self.duplicateScanProgress = nil
-                guard changed else { return }
-                self.tally.setMembers(result.extras, for: .duplicates)
-                let wasOpen = self.selected == .duplicates
+                self.hasScanned = true
+                self.cleanupScanProgress = nil
+                guard result.members != self.scanned || result.queues != self.scannedQueues else { return }
+
+                let open = self.selected
+                let openChanged = open.map { $0.isScanned && result.members[$0] != self.scanned[$0] } ?? false
+                var tally = self.tally
+                for kind in self.scanned.keys where result.members[kind] == nil {
+                    tally.setMembers([], for: kind)
+                }
+                for (kind, ids) in result.members where self.scanned[kind] != ids {
+                    tally.setMembers(ids, for: kind)
+                }
+                self.tally = tally
+                self.scanned = result.members
+                self.scannedQueues = result.queues
                 self.publishQueues()
-                // If the Duplicates queue is still the open one, show its new contents.
-                if wasOpen, self.selected == .duplicates { self.reloadDeck() }
+                // If a scanned queue is still the open one, show its new contents.
+                if openChanged, self.selected == open { self.reloadDeck() }
             }
         }
     }
@@ -303,11 +314,11 @@ final class AppModel: ObservableObject {
         // "All items" shows everything in the queue, including what was already kept or marked.
         let decided = countMode == .all ? [] : decidedIDs
         let knownSizes = sizes
-        let duplicateIDs = self.duplicateIDs
+        let scannedIDs = scanned[kind] ?? []
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             var list: [PHAsset] = []
-            PhotoLibrary.fetch(kind, sort: sort, duplicateIDs: duplicateIDs).enumerateObjects { asset, _, _ in
+            PhotoLibrary.fetch(kind, sort: sort, scannedIDs: scannedIDs).enumerateObjects { asset, _, _ in
                 if !decided.contains(asset.localIdentifier) { list.append(asset) }
             }
             var byID: [String: PHAsset] = [:]

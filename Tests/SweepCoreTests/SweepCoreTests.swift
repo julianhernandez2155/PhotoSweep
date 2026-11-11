@@ -1,5 +1,3 @@
-// All tests live in this one file on purpose. With only the Command Line Tools installed (no Xcode),
-// a test target with more than one file fails to find the Swift Testing macro plugin.
 import Foundation
 import Testing
 @testable import SweepCore
@@ -635,6 +633,53 @@ import Testing
         #expect(store.kept == ["a", "b"])
         #expect(store.marked.isEmpty)
         #expect(store.markedBytes.isEmpty)
+    }
+}
+
+@Suite struct CleanupRulesTests {
+    @Test func largeItemsKeepsOrderAndSkipsSmallOrUnknownSizes() {
+        let sizes: [String: Int64] = ["a": 250_000_000, "b": 99_999_999, "c": 100_000_000]
+        #expect(LargeItems.select(["a", "b", "c", "unknown"], sizes: sizes) == ["a", "c"])
+        #expect(LargeItems.select(["a", "b", "c"], sizes: sizes, minimumBytes: 200_000_000) == ["a"])
+        #expect(LargeItems.select(["a"], sizes: [:]).isEmpty)
+    }
+
+    private func items(_ count: Int, bundle: String, name: String, prefix: String) -> [ItemSource] {
+        (0..<count).map { ItemSource(id: "\(prefix)\($0)", bundleID: bundle, appName: name) }
+    }
+
+    @Test func groupsAppsWithEnoughItemsBiggestFirst() {
+        let all = items(30, bundle: "com.snap.app", name: "Snapchat", prefix: "s")
+            + items(50, bundle: "net.chat.app", name: "Chat", prefix: "c")
+            + items(5, bundle: "org.rare.app", name: "Rare", prefix: "r")
+        let groups = SourceGrouping.groups(all, minimumCount: 20)
+        #expect(groups.map(\.appName) == ["Chat", "Snapchat"])
+        #expect(groups[1].ids.count == 30)
+        #expect(groups[1].ids.first == "s0")
+    }
+
+    @Test func applesOwnAppsAndItemsWithNoAppAreSkipped() {
+        let all = items(500, bundle: "com.apple.camera", name: "Camera", prefix: "a")
+            + items(40, bundle: "", name: "", prefix: "n")
+            + items(25, bundle: "com.snap.app", name: "Snapchat", prefix: "s")
+        #expect(SourceGrouping.groups(all).map(\.bundleID) == ["com.snap.app"])
+    }
+
+    @Test func theMostCommonNameIsUsedAndAMissingNameFallsBackToTheBundle() {
+        let renamed = items(3, bundle: "com.snap.app", name: "Snap", prefix: "old")
+            + items(20, bundle: "com.snap.app", name: "Snapchat", prefix: "new")
+        #expect(SourceGrouping.groups(renamed).first?.appName == "Snapchat")
+        let unnamed = items(20, bundle: "com.example.photobooth", name: "", prefix: "u")
+        #expect(SourceGrouping.groups(unnamed).first?.appName == "Photobooth")
+    }
+
+    @Test func noMoreGroupsThanTheLimit() {
+        var all: [ItemSource] = []
+        for app in 0..<10 {
+            all += items(20 + app, bundle: "com.example.app\(app)", name: "App \(app)", prefix: "a\(app)-")
+        }
+        let groups = SourceGrouping.groups(all, limit: 3)
+        #expect(groups.map(\.appName) == ["App 9", "App 8", "App 7"])
     }
 }
 

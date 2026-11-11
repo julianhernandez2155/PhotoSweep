@@ -21,14 +21,20 @@ enum SelfTest {
         var passed: Bool
     }
 
-    /// The duplicate scan passes by finishing. Finding nothing is a normal result, so unlike
-    /// the other queues it is not required to hold anything.
-    struct DuplicatesReport: Codable {
+    struct ScannedQueueReport: Codable {
+        var title: String
+        var count: Int
+        var allStillInLibrary: Bool
+    }
+
+    /// The cleanup scan passes by finishing with consistent results. Finding nothing is normal,
+    /// so unlike the other queues its queues are not required to hold anything.
+    struct CleanupScanReport: Codable {
         var itemsScanned: Int
         var lookAlikeItems: Int
-        var groups: Int
-        var extraCopies: Int
-        var extraCopiesBytes: Int64
+        var duplicateGroups: Int
+        var savedByAppAvailable: Bool
+        var queues: [ScannedQueueReport]
         var seconds: Double
         var passed: Bool
     }
@@ -49,7 +55,7 @@ enum SelfTest {
         var queueCount: Int
         var queues: [QueueReport]
         var counts: CountsReport?
-        var duplicates: DuplicatesReport?
+        var cleanupScan: CleanupScanReport?
         var allPassed: Bool
         var finishedAt: String
     }
@@ -68,7 +74,7 @@ enum SelfTest {
             DispatchQueue.global(qos: .userInitiated).async {
                 var reports: [QueueReport] = []
                 var counts: CountsReport?
-                var duplicates: DuplicatesReport?
+                var cleanupScan: CleanupScanReport?
                 if status == .authorized {
                     let clock = ContinuousClock()
                     var index = LibraryIndex(queues: [], members: [:])
@@ -81,7 +87,7 @@ enum SelfTest {
                         reports.append(check(queue))
                     }
                     counts = checkCounts(index: index, tally: tally, buildSeconds: seconds(buildTime))
-                    duplicates = checkDuplicates()
+                    cleanupScan = checkCleanupScan()
                 }
                 let report = Report(
                     authorization: name(of: status),
@@ -89,9 +95,9 @@ enum SelfTest {
                     queueCount: reports.count,
                     queues: reports,
                     counts: counts,
-                    duplicates: duplicates,
+                    cleanupScan: cleanupScan,
                     allPassed: status == .authorized && !reports.isEmpty && reports.allSatisfy(\.passed)
-                        && counts?.passed == true && duplicates?.passed == true,
+                        && counts?.passed == true && cleanupScan?.passed == true,
                     finishedAt: ISO8601DateFormatter().string(from: Date()))
                 write(report, to: reportPath)
                 DispatchQueue.main.async { NSApp.terminate(nil) }
@@ -148,28 +154,32 @@ enum SelfTest {
     }
 
     /// Runs the same scan the app does, starting with no cached sizes.
-    private static func checkDuplicates() -> DuplicatesReport {
-        var result: DuplicateScanner.Result?
+    private static func checkCleanupScan() -> CleanupScanReport {
+        var result: CleanupScanner.Result?
         let elapsed = ContinuousClock().measure {
-            result = DuplicateScanner.scan(knownSizes: [:])
+            result = CleanupScanner.scan(knownSizes: [:])
         }
         guard let result else {
-            return DuplicatesReport(
-                itemsScanned: 0, lookAlikeItems: 0, groups: 0, extraCopies: 0, extraCopiesBytes: 0,
-                seconds: seconds(elapsed), passed: false)
+            return CleanupScanReport(
+                itemsScanned: 0, lookAlikeItems: 0, duplicateGroups: 0, savedByAppAvailable: false,
+                queues: [], seconds: seconds(elapsed), passed: false)
         }
-        // Every extra copy must still be in the library, and none may be the copy being kept.
-        let keepers = Set(result.groups.map(\.keeper))
-        let found = PhotoLibrary.fetch(.duplicates, duplicateIDs: result.extras).count
-        let consistent = found == result.extras.count && keepers.isDisjoint(with: result.extras)
-        return DuplicatesReport(
+        let queues = result.queues.map { queue -> ScannedQueueReport in
+            let ids = result.members[queue.kind] ?? []
+            let found = PhotoLibrary.fetch(queue.kind, scannedIDs: ids).count
+            return ScannedQueueReport(title: queue.title, count: ids.count, allStillInLibrary: found == ids.count)
+        }
+        // No extra copy may also be the copy that is being kept.
+        let keepers = Set(result.duplicateGroups.map(\.keeper))
+        let keepersSafe = keepers.isDisjoint(with: result.members[.duplicates] ?? [])
+        return CleanupScanReport(
             itemsScanned: result.scannedCount,
-            lookAlikeItems: result.candidateCount,
-            groups: result.groups.count,
-            extraCopies: result.extras.count,
-            extraCopiesBytes: result.extras.reduce(0) { $0 + (result.measured[$1] ?? 0) },
+            lookAlikeItems: result.lookAlikeCount,
+            duplicateGroups: result.duplicateGroups.count,
+            savedByAppAvailable: result.sourcesAvailable,
+            queues: queues,
             seconds: seconds(elapsed),
-            passed: consistent)
+            passed: keepersSafe && queues.allSatisfy(\.allStillInLibrary))
     }
 
     /// Loads the final (not degraded) image through the same pipeline the cards use.

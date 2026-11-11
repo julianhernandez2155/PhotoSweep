@@ -166,10 +166,10 @@ struct MainView: View {
                         .badge(model.tally.count(queue.kind, mode: model.countMode))
                         .tag(queue.kind)
                 }
-                if section == .library, let fraction = model.duplicateScanProgress {
+                if section == .cleanup, let fraction = model.cleanupScanProgress {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
-                        Text("Finding duplicates… \(Int(fraction * 100))%")
+                        Text("Looking for more… \(Int(fraction * 100))%")
                             .monospacedDigit()
                     }
                     .font(.callout)
