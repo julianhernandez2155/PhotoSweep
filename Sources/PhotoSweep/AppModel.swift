@@ -10,6 +10,12 @@ enum DeckAction {
     case scrollEnded
 }
 
+/// How the open queue is shown: one card at a time, or a grid of thumbnails.
+enum ViewMode: String {
+    case cards
+    case grid
+}
+
 struct DeletionSummary: Identifiable {
     let id = UUID()
     let count: Int
@@ -38,23 +44,60 @@ final class AppModel: ObservableObject {
     @Published var muted = true {
         didSet { activeVideo?.setMuted(muted) }
     }
-    /// Whether the sidebar shows everything in each queue or only what is left to swipe.
+    /// "All items" or "Left to swipe". Decides both the numbers in the sidebar and which cards
+    /// the open queue shows: everything in it, or only the items with no decision yet.
     @Published var countMode: CountMode {
-        didSet { UserDefaults.standard.set(countMode.rawValue, forKey: Self.countModeKey) }
+        didSet {
+            guard oldValue != countMode else { return }
+            UserDefaults.standard.set(countMode.rawValue, forKey: Self.countModeKey)
+            reloadDeck()
+        }
     }
+    /// How many items "Mark All Remaining" would add, worked out when the confirmation opens.
+    @Published private(set) var markAllCount = 0
     /// Per-queue totals and "left to swipe" counts, kept current as decisions are made.
     @Published private(set) var tally = QueueTally<QueueKind>()
     /// 0...1 during the first duplicate scan after launch; nil otherwise.
     @Published private(set) var duplicateScanProgress: Double?
     @Published var confirmMarkAll = false
 
+    @Published var viewMode: ViewMode {
+        didSet {
+            guard oldValue != viewMode else { return }
+            UserDefaults.standard.set(viewMode.rawValue, forKey: Self.viewModeKey)
+            previewID = nil
+            if viewMode == .grid {
+                VideoPool.shared.reset()
+            } else if gallery.hasChanges {
+                reloadDeck()  // so the cards skip what was just decided in the grid
+            } else {
+                preheat()
+            }
+        }
+    }
+    /// Clicks made in the grid since the queue was loaded, for undo.
+    @Published private(set) var gallery = GallerySession()
+    /// The thumbnail the arrow keys are on.
+    @Published private(set) var galleryFocus: String?
+    /// The item shown large over the grid, if any.
+    @Published private(set) var previewID: String?
+    @Published var confirmKeepRest = false
+    @Published private(set) var keepRestCount = 0
+    /// Columns in the grid right now, so the up and down arrows can move by a row.
+    var galleryColumns = 1
+    private var lastGalleryClick: (id: String, time: Date)?
+
     /// Key presses and trackpad swipes, forwarded to the deck view so it can animate them.
     let actions = PassthroughSubject<DeckAction, Never>()
     weak var activeVideo: VideoController?
 
     private static let countModeKey = "countMode"
+    private static let viewModeKey = "viewMode"
 
     private var assets: [String: PHAsset] = [:]
+    /// What each item's decision was before it was swiped in the open queue (absent: none).
+    /// Lets undo put back an earlier decision when browsing all items.
+    private var earlierDecisions: [String: Decision] = [:]
     /// Queues read from the library. `queues` is these plus the Duplicates queue when it has items.
     private var libraryQueues: [SweepQueue] = []
     private var duplicateIDs: [String] = []
@@ -83,7 +126,8 @@ final class AppModel: ObservableObject {
         store = stateFile.load(default: SweepStore())
         sizes = sizesFile.load(default: [:])
         auth = PHPhotoLibrary.authorizationStatus(for: .readWrite)
-        countMode = UserDefaults.standard.string(forKey: Self.countModeKey).flatMap(CountMode.init) ?? .all
+        countMode = UserDefaults.standard.string(forKey: Self.countModeKey).flatMap(CountMode.init) ?? .left
+        viewMode = UserDefaults.standard.string(forKey: Self.viewModeKey).flatMap(ViewMode.init) ?? .cards
     }
 
     // MARK: - Access
@@ -242,6 +286,11 @@ final class AppModel: ObservableObject {
         ImagePipeline.stopPreheating()
         VideoPool.shared.reset()
         sizingProgress = nil
+        earlierDecisions = [:]
+        gallery = GallerySession()
+        galleryFocus = nil
+        previewID = nil
+        lastGalleryClick = nil
 
         guard let kind = selected, isAuthorized else {
             deck = SweepDeck()
@@ -251,7 +300,8 @@ final class AppModel: ObservableObject {
         }
         isLoading = true
         let sort = self.sort
-        let decided = decidedIDs
+        // "All items" shows everything in the queue, including what was already kept or marked.
+        let decided = countMode == .all ? [] : decidedIDs
         let knownSizes = sizes
         let duplicateIDs = self.duplicateIDs
 
@@ -299,6 +349,7 @@ final class AppModel: ObservableObject {
 
     func decide(_ decision: Decision) {
         guard let id = deck.current else { return }
+        earlierDecisions[id] = store.decision(for: id)
         store.apply(decision, to: id, bytes: decision == .delete ? size(forID: id) : nil)
         deck.decide(decision)
         tally.setDecided(id, true)
@@ -306,25 +357,52 @@ final class AppModel: ObservableObject {
         preheat()
     }
 
-    /// Takes back the last action: one swipe, or everything a "Mark All Remaining" added.
+    var canUndo: Bool { viewMode == .grid ? gallery.canUndo : deck.canUndo }
+
+    func asset(forID id: String) -> PHAsset? { assets[id] }
+
+    /// Takes back the last action: one swipe, a click in the grid, or a whole batch.
     func undo() {
+        if viewMode == .grid {
+            undoGallery()
+            return
+        }
         let undone = deck.undoLast().map(\.id)
         guard !undone.isEmpty else { return }
-        if undone.count == 1 {
-            store.clearDecision(for: undone[0])
-        } else {
-            store.clearDecisions(for: Set(undone))
+        // Items that had a decision before this queue was opened go back to that decision.
+        let fresh = undone.filter { earlierDecisions[$0] == nil }
+        for id in undone {
+            guard let earlier = earlierDecisions.removeValue(forKey: id) else { continue }
+            store.restore(earlier, for: id, bytes: earlier == .delete ? size(forID: id) : nil)
         }
-        tally.setDecided(undone, false)
+        store.clearDecisions(for: Set(fresh))
+        tally.setDecided(fresh, false)
         scheduleSave()
         preheat()
+    }
+
+    /// The items from the current card onward that have no decision yet. Items already kept
+    /// or marked (visible when browsing all items) are left as they are.
+    private func undecidedRemaining() -> [String] {
+        let decided = decidedIDs
+        return deck.remainingIDs.filter { !decided.contains($0) }
+    }
+
+    /// Opens the confirmation for "Mark All Remaining".
+    func requestMarkAll() {
+        guard !isLoading else { return }
+        markAllCount = undecidedRemaining().count
+        confirmMarkAll = true
     }
 
     /// Puts every item still waiting in the open queue on the delete list. Nothing is deleted:
     /// the review sheet and the macOS confirmation still stand between this and the library.
     func markAllRemaining() {
-        let ids = deck.remainingIDs
+        let ids = undecidedRemaining()
         guard !ids.isEmpty, !isLoading else { return }
+        for id in deck.remainingIDs {
+            earlierDecisions[id] = store.decision(for: id)
+        }
         var known: [String: Int64] = [:]
         var unsized: [PHAsset] = []
         for id in ids {
@@ -387,6 +465,81 @@ final class AppModel: ObservableObject {
         ImagePipeline.preheat(deck.upcoming(3).compactMap { assets[$0] })
         let videos = deck.upcoming(2).compactMap { assets[$0] }.filter { $0.mediaType == .video }
         VideoPool.shared.prepare(upcoming: videos, keeping: deck.current)
+    }
+
+    // MARK: - Gallery
+
+    /// A click on a thumbnail marks it straight away. If a second click follows quickly, it was
+    /// a double-click: the mark is taken back and the item opens large instead.
+    func galleryClick(_ id: String) {
+        galleryFocus = id
+        let now = Date()
+        if let last = lastGalleryClick, last.id == id,
+            now.timeIntervalSince(last.time) < NSEvent.doubleClickInterval
+        {
+            lastGalleryClick = nil
+            undoGallery()
+            previewID = id
+        } else {
+            lastGalleryClick = (id, now)
+            toggleMark(id)
+        }
+    }
+
+    /// Puts an item on the delete list, or takes it back off.
+    func toggleMark(_ id: String) {
+        let marking = store.decision(for: id) != .delete
+        gallery.toggleMark(id, in: &store, bytes: marking ? size(forID: id) : nil)
+        tally.setDecided(id, store.decision(for: id) != nil)
+        scheduleSave()
+    }
+
+    private func undoGallery() {
+        let changed = gallery.undo(in: &store, bytes: { [weak self] id in self?.size(forID: id) })
+        guard !changed.isEmpty else { return }
+        let decided = decidedIDs
+        for id in changed { tally.setDecided(id, decided.contains(id)) }
+        scheduleSave()
+    }
+
+    func openPreview(_ id: String) {
+        galleryFocus = id
+        previewID = id
+    }
+
+    func closePreview() {
+        previewID = nil
+    }
+
+    /// Moves the highlighted thumbnail. With an item open large, that item changes with it.
+    func moveGalleryFocus(by offset: Int) {
+        let ids = deck.ids
+        guard !ids.isEmpty else { return }
+        guard let focus = galleryFocus, let index = ids.firstIndex(of: focus) else {
+            galleryFocus = ids[0]
+            if previewID != nil { previewID = ids[0] }
+            return
+        }
+        let target = index + offset
+        guard ids.indices.contains(target) else { return }
+        galleryFocus = ids[target]
+        if previewID != nil { previewID = ids[target] }
+    }
+
+    /// Opens the confirmation for "Keep the Rest".
+    func requestKeepRest() {
+        guard !isLoading else { return }
+        let decided = decidedIDs
+        keepRestCount = deck.ids.reduce(0) { $0 + (decided.contains($1) ? 0 : 1) }
+        confirmKeepRest = true
+    }
+
+    /// Keeps every item in the open queue that has no decision yet, so the queue is finished.
+    func keepRest() {
+        let kept = gallery.keepUndecided(deck.ids, in: &store)
+        guard !kept.isEmpty else { return }
+        tally.setDecided(kept, true)
+        saveNow()
     }
 
     // MARK: - Review and delete
@@ -492,6 +645,7 @@ final class AppModel: ObservableObject {
         guard deckHasFocus(event) else { return event }
         let modifiers = event.modifierFlags.intersection([.command, .option, .control])
         guard modifiers.isEmpty else { return event }
+        if viewMode == .grid { return handleGalleryKey(event) }
         switch event.keyCode {
         case 123:  // left arrow
             if !event.isARepeat { actions.send(.swipe(.delete)) }
@@ -509,7 +663,42 @@ final class AppModel: ObservableObject {
         return nil
     }
 
+    /// In the grid the arrows move the highlight instead of swiping.
+    private func handleGalleryKey(_ event: NSEvent) -> NSEvent? {
+        guard !isLoading else { return event }
+        switch event.keyCode {
+        case 123:  // left arrow
+            moveGalleryFocus(by: -1)
+        case 124:  // right arrow
+            moveGalleryFocus(by: 1)
+        case 125:  // down arrow
+            moveGalleryFocus(by: previewID == nil ? galleryColumns : 1)
+        case 126:  // up arrow
+            moveGalleryFocus(by: previewID == nil ? -galleryColumns : -1)
+        case 51, 117:  // delete, forward delete
+            guard let id = previewID ?? galleryFocus, !event.isARepeat else { return event }
+            toggleMark(id)
+        case 49, 36:  // space, return
+            if previewID != nil {
+                previewID = nil
+            } else if let focus = galleryFocus {
+                previewID = focus
+            } else {
+                return event
+            }
+        case 53:  // escape
+            guard previewID != nil else { return event }
+            previewID = nil
+        case 46:  // M
+            muted.toggle()
+        default:
+            return event
+        }
+        return nil
+    }
+
     private func handleScroll(_ event: NSEvent) -> NSEvent? {
+        guard viewMode == .cards else { return event }
         guard deckHasFocus(event), event.hasPreciseScrollingDeltas else { return event }
         // Swallow the coasting that follows a swipe we already handled.
         if !event.momentumPhase.isEmpty {

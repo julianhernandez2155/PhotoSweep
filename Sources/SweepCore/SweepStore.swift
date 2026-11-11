@@ -40,6 +40,22 @@ public struct SweepStore: Codable, Equatable, Sendable {
     public func isMarked(_ id: String) -> Bool { marked.contains(id) }
     public func isKept(_ id: String) -> Bool { kept.contains(id) }
 
+    /// The decision on an item, or nil if it has none yet.
+    public func decision(for id: String) -> Decision? {
+        if kept.contains(id) { return .keep }
+        return marked.contains(id) ? .delete : nil
+    }
+
+    /// Puts an item back the way it was before a swipe: its earlier decision, or none.
+    /// Used by undo when the swipe replaced a decision made before.
+    public mutating func restore(_ earlier: Decision?, for id: String, bytes: Int64? = nil) {
+        if let earlier {
+            apply(earlier, to: id, bytes: bytes)
+        } else {
+            clearDecision(for: id)
+        }
+    }
+
     /// Records a decision. Deciding again on the same item replaces the earlier decision.
     public mutating func apply(_ decision: Decision, to id: String, bytes: Int64? = nil) {
         switch decision {
@@ -86,6 +102,12 @@ public struct SweepStore: Codable, Equatable, Sendable {
             if current.insert(id).inserted { marked.append(id) }
             if let size = bytes[id] { markedBytes[id] = size }
         }
+    }
+
+    /// Keeps many items in one step, replacing any earlier decision on them.
+    public mutating func keepAll(_ ids: [String]) {
+        removeFromMarked(Set(ids).intersection(marked))
+        kept.formUnion(ids)
     }
 
     /// Forgets the decisions on many items at once.

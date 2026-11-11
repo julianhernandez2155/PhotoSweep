@@ -22,17 +22,19 @@ struct PhotoSweepApp: App {
         .defaultSize(width: 1240, height: 840)
         .commands {
             CommandGroup(replacing: .undoRedo) {
-                Button("Undo Last Swipe") { model.undo() }
+                Button("Undo") { model.undo() }
                     .keyboardShortcut("z", modifiers: .command)
-                    .disabled(!model.deck.canUndo || model.showReview)
+                    .disabled(!model.canUndo || model.showReview)
             }
             CommandGroup(replacing: .newItem) {
                 Button("Refresh Library") { model.refresh() }
                     .keyboardShortcut("r", modifiers: .command)
                     .disabled(!model.isAuthorized || model.isRefreshing)
                 Divider()
-                Button("Mark All Remaining for Deletion…") { model.confirmMarkAll = true }
-                    .disabled(!model.isAuthorized || model.deck.remaining == 0 || model.isLoading || model.showReview)
+                Button("Mark All Remaining for Deletion…") { model.requestMarkAll() }
+                    .disabled(
+                        !model.isAuthorized || model.deck.remaining == 0 || model.isLoading
+                            || model.showReview || model.viewMode == .grid)
             }
         }
     }

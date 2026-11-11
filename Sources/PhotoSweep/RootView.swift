@@ -121,7 +121,7 @@ struct MainView: View {
             .labelsHidden()
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
-            .help("Show how many items each queue holds, or how many you have not swiped yet")
+            .help("Go through everything in each queue, or only what you have not swiped yet")
         }
         .toolbar {
             ToolbarItem {

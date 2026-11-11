@@ -29,9 +29,25 @@ The sidebar has three groups:
 
 Hidden items and shared albums are never shown. Empty albums are left out.
 
-A switch at the top of the sidebar changes the number next to each queue: **All items** is everything in the queue, and **Left to swipe** is what you have not decided on yet. An item you keep or mark is skipped in every queue from then on, so you never see it twice.
+A switch at the top of the sidebar chooses what you go through:
+
+- **Left to swipe** (the default) shows only the items you have not decided on yet. Once you keep or mark an item it is skipped in every queue, so you never see it twice.
+- **All items** shows everything in the queue again, including what you already kept or marked. A small label on the card says "Kept" or "On delete list", and swiping it again changes the decision.
+
+The number next to each queue follows the switch.
 
 Each queue can be ordered by Newest, Oldest, Largest (by file size) or Longest (videos). The first time you sort a big queue by Largest, the app has to measure file sizes, which can take a minute. The sizes are remembered after that.
+
+### Cards or grid
+
+The two-part switch in the header changes how the open queue is shown.
+
+- **Cards** shows one item at a time, for when you need to look at each one.
+- **Grid** shows thumbnails, for when a glance is enough, such as screenshots. Click a thumbnail to mark it for deletion; it turns red. Click it again to take the mark off. Press Space, or double-click, to see an item large, where videos play.
+
+In the grid you only click what you want gone. **Keep the Rest…** at the bottom then keeps everything you did not mark, so the queue is finished.
+
+Marking in the grid does the same thing as swiping left: it adds the item to the delete list and nothing else.
 
 ### Duplicates
 
@@ -50,9 +66,18 @@ For each set of copies it keeps one and puts the others in the queue. It prefers
 | Mute or unmute | M | Speaker button on the card |
 | Re-read albums and counts from Photos | ⌘R | Refresh button in the sidebar |
 
+In the grid, the keys work like a file browser instead:
+
+| Action | Keyboard | Mouse or trackpad |
+| --- | --- | --- |
+| Mark for deletion, or take the mark off | Delete | Click the thumbnail |
+| Move between thumbnails | Arrow keys | |
+| See an item large, and go back | Space or Return (Esc also goes back) | Double-click, or the arrows button on a thumbnail |
+| Undo | ⌘Z | |
+
 Videos play muted and loop. The next video or two are loaded ahead of time so they usually start right away; on a slow connection, or if you swipe quickly, a video stored in iCloud can still take a moment.
 
-The "…" menu next to the sort control has **Mark All Remaining for Deletion**, which adds everything left in the open queue to the delete list after a confirmation. It does not delete anything, and Undo takes the whole batch back off.
+The "…" menu next to the sort control has **Mark All Remaining for Deletion**, which adds every undecided item left in the open queue to the delete list after a confirmation. Items you already kept stay kept. It does not delete anything, and Undo takes the whole batch back off.
 
 ## Requirements
 
@@ -114,7 +139,7 @@ To start over:
 ## Known limits
 
 - **File sizes come from a value Apple does not document.** PhotoKit has no public way to ask how big an item is, so the app reads a `fileSize` value from each item's resources. It works on the tested system, but Apple could change it. If it is unavailable the app shows "size unknown", the Largest sort has nothing to sort by, and the Duplicates queue stays empty, because a duplicate is only confirmed when file sizes match.
-- **It has only been tested on one setup** (macOS 27.2, Swift 6.4, Apple Silicon, a library of about 32,000 items in iCloud Photos).
+- **It has only been tested on one setup** (macOS 27.2, Swift 6.4, Apple Silicon, a large library stored in iCloud Photos).
 - **The window is English only.**
 
 ## For contributors

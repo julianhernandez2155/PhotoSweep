@@ -22,30 +22,59 @@ struct DeckView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            ZStack { stage }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(.horizontal, 28)
-                .padding(.top, 6)
-                .padding(.bottom, 12)
-            infoLine
-            controls
+            if model.viewMode == .grid, !model.isLoading, model.selected != nil, model.deck.total > 0 {
+                GalleryView()
+                GalleryFooter()
+            } else {
+                ZStack { stage }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(.horizontal, 28)
+                    .padding(.top, 6)
+                    .padding(.bottom, 12)
+                if model.viewMode == .cards {
+                    infoLine
+                    controls
+                }
+            }
         }
         .background(Color(white: 0.13))
         .onReceive(model.actions, perform: handle)
         .confirmationDialog(markAllTitle, isPresented: $model.confirmMarkAll) {
-            Button("Add \(Format.count(model.deck.remaining)) to Delete List", role: .destructive) {
-                model.markAllRemaining()
+            if model.markAllCount > 0 {
+                Button("Add \(Format.count(model.markAllCount)) to Delete List", role: .destructive) {
+                    model.markAllRemaining()
+                }
             }
-            Button("Cancel", role: .cancel) {}
+            Button(model.markAllCount > 0 ? "Cancel" : "OK", role: .cancel) {}
         } message: {
-            Text("This only adds them to your delete list. Nothing is deleted until you review the list and confirm, and Undo takes them all back off.")
+            Text(model.markAllCount > 0
+                ? "This only adds them to your delete list. Nothing is deleted until you review the list and confirm, and Undo takes them all back off. Items you already kept stay kept."
+                : "Every remaining item is already kept or on your delete list.")
         }
     }
 
     private var markAllTitle: String {
-        let count = model.deck.remaining
+        let count = model.markAllCount
+        guard count > 0 else { return "Nothing left to mark in this queue" }
         let noun = count == 1 ? "item" : "items"
-        return "Mark the \(Format.count(count)) remaining \(noun) in “\(model.selectedQueue?.title ?? "this queue")” for deletion?"
+        return "Mark the \(Format.count(count)) undecided \(noun) left in “\(model.selectedQueue?.title ?? "this queue")” for deletion?"
+    }
+
+    /// When browsing all items, says what was already decided about the card on top.
+    @ViewBuilder private func decidedBadge(for id: String) -> some View {
+        if model.countMode == .all, let decision = model.store.decision(for: id) {
+            Label(
+                decision == .keep ? "Kept" : "On delete list",
+                systemImage: decision == .keep ? "checkmark.circle.fill" : "trash.fill"
+            )
+            .font(.caption.weight(.semibold))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(.black.opacity(0.6), in: Capsule())
+            .foregroundStyle(decision == .keep ? Color.green : Color.red)
+            .padding(14)
+            .allowsHitTesting(false)
+        }
     }
 
     // MARK: - Header
@@ -55,12 +84,13 @@ struct DeckView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(model.selectedQueue?.title ?? "PhotoSweep")
                     .font(.headline)
+                    .lineLimit(1)
                 Text(positionText)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
-            if model.deck.total > 0 {
+            if model.deck.total > 0, model.viewMode == .cards {
                 ProgressView(value: Double(model.deck.cursor), total: Double(model.deck.total))
                     .frame(maxWidth: 220)
             }
@@ -73,9 +103,18 @@ struct DeckView: View {
             .fixedSize()
             .help("Order of this queue")
 
+            Picker("View", selection: $model.viewMode) {
+                Image(systemName: "rectangle.portrait").tag(ViewMode.cards)
+                Image(systemName: "square.grid.3x3").tag(ViewMode.grid)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .help("One card at a time, or a grid of thumbnails")
+
             Menu {
-                Button("Mark All Remaining for Deletion…") { model.confirmMarkAll = true }
-                    .disabled(model.deck.remaining == 0 || model.isLoading)
+                Button("Mark All Remaining for Deletion…") { model.requestMarkAll() }
+                    .disabled(model.deck.remaining == 0 || model.isLoading || model.viewMode == .grid)
             } label: {
                 Label("More", systemImage: "ellipsis.circle")
             }
@@ -107,6 +146,9 @@ struct DeckView: View {
     private var positionText: String {
         let deck = model.deck
         guard deck.total > 0 else { return " " }
+        if model.viewMode == .grid {
+            return "\(Format.count(deck.total)) \(deck.total == 1 ? "item" : "items")"
+        }
         if deck.isFinished { return "All \(Format.count(deck.total)) reviewed" }
         return "\(Format.count(deck.position)) of \(Format.count(deck.total))"
     }
@@ -135,7 +177,12 @@ struct DeckView: View {
         } else if model.selected == nil {
             message("Pick a queue", "Choose what to sort through in the sidebar.", symbol: "sidebar.left")
         } else if model.deck.total == 0 {
-            message("Nothing left here", "Everything in this queue already has a decision.", symbol: "checkmark.circle")
+            message(
+                "Nothing left here",
+                model.countMode == .left
+                    ? "Everything in this queue already has a decision. Switch to “All items” in the sidebar to go through them again."
+                    : "This queue is empty.",
+                symbol: "checkmark.circle")
         } else if model.deck.isFinished {
             finished
         } else {
@@ -148,6 +195,7 @@ struct DeckView: View {
             if let current = model.currentAsset {
                 AssetCard(asset: current, isActive: true)
                     .id(current.localIdentifier)
+                    .overlay(alignment: .topTrailing) { decidedBadge(for: current.localIdentifier) }
                     .overlay { stamps }
                     .offset(drag)
                     .rotationEffect(.degrees(Double(drag.width) / 28))
@@ -264,7 +312,7 @@ struct DeckView: View {
     }
 
     private func handle(_ action: DeckAction) {
-        guard model.currentAsset != nil, !model.isLoading else { return }
+        guard model.viewMode == .cards, model.currentAsset != nil, !model.isLoading else { return }
         switch action {
         case .swipe(let decision):
             commit(decision)

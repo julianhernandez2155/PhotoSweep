@@ -500,6 +500,144 @@ import Testing
     }
 }
 
+@Suite struct RevisitingDecidedItemsTests {
+    @Test func decisionReportsKeepDeleteOrNone() {
+        var store = SweepStore()
+        store.apply(.keep, to: "k")
+        store.apply(.delete, to: "d")
+        #expect(store.decision(for: "k") == .keep)
+        #expect(store.decision(for: "d") == .delete)
+        #expect(store.decision(for: "new") == nil)
+    }
+
+    @Test func undoingAChangedDecisionBringsBackTheEarlierOne() {
+        var store = SweepStore()
+        store.apply(.keep, to: "a")
+        let earlier = store.decision(for: "a")
+        store.apply(.delete, to: "a", bytes: 50)  // swiped again while browsing all items
+        store.restore(earlier, for: "a")
+        #expect(store.decision(for: "a") == .keep)
+        #expect(store.marked.isEmpty)
+        #expect(store.totalMarkedBytes == 0)
+    }
+
+    @Test func undoingBackToTheDeleteListKeepsItsSize() {
+        var store = SweepStore()
+        store.apply(.delete, to: "a", bytes: 50)
+        let earlier = store.decision(for: "a")
+        store.apply(.keep, to: "a")
+        store.restore(earlier, for: "a", bytes: 50)
+        #expect(store.decision(for: "a") == .delete)
+        #expect(store.totalMarkedBytes == 50)
+    }
+
+    @Test func undoingAFirstDecisionLeavesNoDecision() {
+        var store = SweepStore()
+        store.apply(.delete, to: "a", bytes: 50)
+        store.restore(nil, for: "a")
+        #expect(store.decision(for: "a") == nil)
+    }
+}
+
+@Suite struct GallerySessionTests {
+    @Test func aClickMarksAndASecondClickTakesItBackOff() {
+        var store = SweepStore()
+        var session = GallerySession()
+        session.toggleMark("a", in: &store, bytes: 40)
+        #expect(store.decision(for: "a") == .delete)
+        #expect(store.totalMarkedBytes == 40)
+        session.toggleMark("a", in: &store)
+        #expect(store.decision(for: "a") == nil)
+        #expect(store.totalMarkedBytes == 0)
+    }
+
+    @Test func unmarkingAnItemThatWasKeptMakesItKeptAgain() {
+        var store = SweepStore()
+        store.apply(.keep, to: "a")
+        var session = GallerySession()
+        session.toggleMark("a", in: &store)
+        #expect(store.decision(for: "a") == .delete)
+        session.toggleMark("a", in: &store)
+        #expect(store.decision(for: "a") == .keep)
+    }
+
+    @Test func unmarkingAnItemMarkedEarlierLeavesItUndecided() {
+        var store = SweepStore()
+        store.apply(.delete, to: "a", bytes: 10)
+        var session = GallerySession()
+        session.toggleMark("a", in: &store)
+        #expect(store.decision(for: "a") == nil)
+    }
+
+    @Test func undoStepsBackThroughClicksInOrder() {
+        var store = SweepStore()
+        store.apply(.keep, to: "k")
+        var session = GallerySession()
+        session.toggleMark("a", in: &store, bytes: 10)
+        session.toggleMark("k", in: &store, bytes: 20)
+        session.toggleMark("a", in: &store)  // back off the list
+
+        #expect(session.undo(in: &store, bytes: { _ in 10 }) == ["a"])
+        #expect(store.decision(for: "a") == .delete)
+        #expect(store.markedBytes["a"] == 10)
+        #expect(session.undo(in: &store) == ["k"])
+        #expect(store.decision(for: "k") == .keep)
+        #expect(session.undo(in: &store) == ["a"])
+        #expect(store.decision(for: "a") == nil)
+        #expect(!session.canUndo)
+        #expect(session.undo(in: &store).isEmpty)
+    }
+
+    @Test func keepTheRestOnlyTouchesUndecidedItems() {
+        var store = SweepStore()
+        store.apply(.keep, to: "k")
+        var session = GallerySession()
+        session.toggleMark("m", in: &store, bytes: 5)
+        let kept = session.keepUndecided(["k", "m", "a", "b"], in: &store)
+        #expect(kept == ["a", "b"])
+        #expect(store.kept == ["k", "a", "b"])
+        #expect(store.marked == ["m"])
+    }
+
+    @Test func undoTakesBackKeepTheRestInOneStep() {
+        var store = SweepStore()
+        store.apply(.keep, to: "k")
+        var session = GallerySession()
+        session.toggleMark("m", in: &store)
+        session.keepUndecided(["k", "m", "a", "b"], in: &store)
+        #expect(Set(session.undo(in: &store)) == ["a", "b"])
+        #expect(store.kept == ["k"])
+        #expect(store.marked == ["m"])
+    }
+
+    @Test func keepTheRestWithNothingUndecidedIsNotAnAction() {
+        var store = SweepStore()
+        store.apply(.keep, to: "k")
+        var session = GallerySession()
+        #expect(session.keepUndecided(["k"], in: &store).isEmpty)
+        #expect(!session.canUndo)
+        #expect(!session.hasChanges)
+    }
+
+    @Test func hasChangesStaysTrueAfterUndo() {
+        var store = SweepStore()
+        var session = GallerySession()
+        #expect(!session.hasChanges)
+        session.toggleMark("a", in: &store)
+        session.undo(in: &store)
+        #expect(session.hasChanges)
+    }
+
+    @Test func keepAllMovesItemsOffTheDeleteList() {
+        var store = SweepStore()
+        store.apply(.delete, to: "a", bytes: 9)
+        store.keepAll(["a", "b"])
+        #expect(store.kept == ["a", "b"])
+        #expect(store.marked.isEmpty)
+        #expect(store.markedBytes.isEmpty)
+    }
+}
+
 @Suite struct MarkAllRemainingTests {
     @Test func decideRemainingFinishesTheDeckFromTheCurrentItem() {
         var deck = SweepDeck(ids: ["a", "b", "c", "d"])
