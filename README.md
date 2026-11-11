@@ -4,7 +4,7 @@ A small Mac app for clearing out your Photos library. It shows one photo or vide
 
 It was built to free up a full iCloud account. A Photos library fills up with screenshots, screen recordings, long videos and accidental duplicates, and going through them in the Photos app is slow. PhotoSweep puts those in queues and lets you go through them with the arrow keys.
 
-> **TODO (screenshot):** replace this line with a screenshot or short GIF of the app.
+![PhotoSweep with a photo being dragged left, showing the DELETE stamp, with Delete, Undo and Keep buttons below](docs/screenshot.jpg)
 
 ## How it keeps your library safe
 
